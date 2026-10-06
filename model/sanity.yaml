@@ -1,0 +1,6 @@
+path: D:/ASM2-scholar/Projects/ltm-project/dataset/sanity
+train: images/train
+val: images/val
+
+nc: 1
+names: ['smoke']

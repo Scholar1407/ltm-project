@@ -1,0 +1,99 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook & IPython
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Unit tests / Coverage / Pytest
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Datasets & Large Archives (Tránh commit dữ liệu nặng vào Git)
+*.rar
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+dataset/
+datasets/
+model/dataset/
+model/datasets/
+
+# Deep Learning / YOLO Model Weights & Checkpoints
+# (Không commit file trọng số nặng vào repository, tải tự động hoặc lưu Cloud/Drive/Release)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.weights
+# Nếu bạn muốn commit trọng số best model sau huấn luyện, hãy bỏ comment dòng bên dưới:
+# !model/weights/**/best.pt
+
+# Training outputs & experiment tracking
+runs/
+model/runs/
+wandb/
+*.log
+
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE & Editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
