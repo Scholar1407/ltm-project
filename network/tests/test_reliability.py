@@ -1,0 +1,299 @@
+"""
+Smoke Alert Protocol (SAP) - Automated Reliability & Correctness Tests
+Course: Network Programming (LTM)
+Specification: prompt/smoke-alert-protocol-spec.md Section 7
+
+Deterministic testing using socket-layer fault injection:
+- Happy-path delivery verification
+- Deterministic packet dropping (e.g. seq 5 and seq 20 on 1st attempt only)
+- NACK generation, selective retransmission, and byte-for-byte reassembly verification
+- CRC32 integrity validation
+"""
+
+import socket
+import threading
+import time
+from typing import Dict, List, Set, Tuple
+import pytest
+
+from network.shared.protocol import (
+    HEADER_SIZE,
+    MAGIC,
+    MAX_PAYLOAD,
+    Packet,
+    PacketType,
+    compute_crc32,
+    pack_nack_payload,
+    pack_packet,
+    split_into_chunks,
+    unpack_nack_payload,
+    unpack_packet,
+)
+from network.sender.sender import SmokeAlertSender
+from network.receiver.receiver import SmokeAlertReceiver
+
+
+class FaultInjectingSocket:
+    """
+    A wrapper around a standard UDP socket that deterministically drops
+    or corrupts specified chunk sequence numbers on designated attempt numbers.
+    """
+
+    def __init__(
+        self,
+        real_sock: socket.socket,
+        drop_chunks_on_attempt: Dict[int, int] = None,  # {seq: attempt_to_drop (1-indexed)}
+        corrupt_chunks_on_attempt: Dict[int, int] = None,
+    ):
+        self._sock = real_sock
+        self.drop_map = drop_chunks_on_attempt or {}
+        self.corrupt_map = corrupt_chunks_on_attempt or {}
+
+        # Tracking state
+        self.send_attempts: Dict[Tuple[int, int], int] = {}  # (img_id, seq) -> count
+        self.dropped_chunks: List[Tuple[int, int]] = []
+        self.corrupted_chunks: List[Tuple[int, int]] = []
+        self.retransmitted_seqs: List[int] = []
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+    def sendto(self, data: bytes, addr) -> int:
+        try:
+            pkt = unpack_packet(data)
+        except Exception:
+            # Non-protocol or malformed data passes through
+            return self._sock.sendto(data, addr)
+
+        if pkt.is_chunk:
+            key = (pkt.img_id, pkt.seq)
+            count = self.send_attempts.get(key, 0) + 1
+            self.send_attempts[key] = count
+
+            if count > 1:
+                self.retransmitted_seqs.append(pkt.seq)
+
+            # Check for deterministic drop
+            if pkt.seq in self.drop_map and count == self.drop_map[pkt.seq]:
+                self.dropped_chunks.append((pkt.img_id, pkt.seq))
+                # Silently drop packet by returning byte count without calling real socket
+                return len(data)
+
+            # Check for deterministic corruption
+            if pkt.seq in self.corrupt_map and count == self.corrupt_map[pkt.seq]:
+                self.corrupted_chunks.append((pkt.img_id, pkt.seq))
+                # Corrupt the payload so CRC check fails
+                corrupted_payload = bytearray(pkt.payload)
+                if corrupted_payload:
+                    corrupted_payload[0] ^= 0xFF
+                corrupted_pkt = pack_packet(
+                    pkt.pkt_type,
+                    pkt.img_id,
+                    pkt.seq,
+                    pkt.total,
+                    pkt.crc32,  # original CRC with mutated payload triggers CRC mismatch
+                    bytes(corrupted_payload),
+                )
+                return self._sock.sendto(corrupted_pkt, addr)
+
+        return self._sock.sendto(data, addr)
+
+
+def generate_synthetic_image(num_chunks: int = 30) -> bytes:
+    """Generates synthetic byte data guaranteeing a specific number of chunks."""
+    size = num_chunks * MAX_PAYLOAD - 250  # 30 chunks total
+    pattern = b"SMOKE_ALERT_SYNTHETIC_FRAME_DATA_" * (size // 33 + 1)
+    return pattern[:size]
+
+
+# -------------------------------------------------------------------------
+# Test Cases
+# -------------------------------------------------------------------------
+
+def test_protocol_pack_unpack():
+    """Validates low-level header structure, byte ordering, and bounds checking."""
+    img_id = 4821
+    seq = 45
+    total = 134
+    payload = b"X" * 1200
+    crc = compute_crc32(payload)
+
+    packed = pack_packet(PacketType.CHUNK, img_id, seq, total, crc, payload)
+    assert len(packed) == HEADER_SIZE + len(payload)
+
+    pkt = unpack_packet(packed)
+    assert pkt.magic == MAGIC
+    assert pkt.pkt_type == PacketType.CHUNK
+    assert pkt.img_id == img_id
+    assert pkt.seq == seq
+    assert pkt.total == total
+    assert pkt.payload_len == len(payload)
+    assert pkt.crc32 == crc
+    assert pkt.payload == payload
+
+
+def test_nack_payload_serialization():
+    """Validates missing chunk sequence number serialization and deserialization."""
+    missing = [5, 20, 42, 105, 999]
+    payload = pack_nack_payload(missing)
+    assert len(payload) == len(missing) * 2
+
+    unpacked = unpack_nack_payload(payload)
+    assert unpacked == missing
+
+
+def test_happy_path_transmission():
+    """
+    Validates Layer 1 Happy Path: All packets arrive without loss.
+    Asserts zero retransmissions and exact byte-for-byte fidelity.
+    """
+    port = 5901
+    original_data = generate_synthetic_image(num_chunks=15)
+    img_id = 7001
+    received_container = {}
+
+    def on_recv(i_id, data, ts):
+        received_container[i_id] = data
+
+    receiver = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=port,
+        on_image_received=on_recv,
+    )
+    receiver.start()
+
+    try:
+        sender = SmokeAlertSender(
+            target_host="127.0.0.1",
+            target_port=port,
+            wait_timeout=0.4,
+        )
+        success = sender.send_image(img_id, original_data, "2026-10-07 10:00:00")
+        sender.close()
+
+        assert success is True
+        assert img_id in received_container
+        assert received_container[img_id] == original_data
+        assert compute_crc32(received_container[img_id]) == compute_crc32(original_data)
+    finally:
+        receiver.stop()
+
+
+def test_selective_loss_and_nack_retransmission():
+    """
+    Validates Layer 3 Specification requirement (Section 7):
+    Deterministically drops sequence 5 and sequence 20 on the first send attempt only.
+    Asserts:
+    - The receiver's reassembled image byte-for-byte matches the original.
+    - Exactly one retransmission round occurred for the dropped sequence numbers (seq 5 and 20).
+    - CRC32 check passes.
+    """
+    port = 5902
+    original_data = generate_synthetic_image(num_chunks=25)
+    img_id = 7002
+    received_container = {}
+
+    def on_recv(i_id, data, ts):
+        received_container[i_id] = data
+
+    receiver = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=port,
+        inactivity_timeout=0.2,  # 200ms inactivity timeout for fast test execution
+        on_image_received=on_recv,
+    )
+    receiver.start()
+
+    raw_sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sender_sock.settimeout(0.5)
+
+    # Wrap sender socket to deterministically drop seq 5 and seq 20 on attempt 1
+    wrapped_sock = FaultInjectingSocket(
+        real_sock=raw_sender_sock,
+        drop_chunks_on_attempt={5: 1, 20: 1},
+    )
+
+    try:
+        sender = SmokeAlertSender(
+            target_host="127.0.0.1",
+            target_port=port,
+            wait_timeout=0.5,
+            sock=wrapped_sock,
+        )
+
+        success = sender.send_image(img_id, original_data, "2026-10-07 10:05:00")
+        sender.close()
+
+        # 1. Assert transmission succeeded
+        assert success is True
+
+        # 2. Assert dropped exactly seq 5 and seq 20 on first attempt
+        assert (img_id, 5) in wrapped_sock.dropped_chunks
+        assert (img_id, 20) in wrapped_sock.dropped_chunks
+        assert len(wrapped_sock.dropped_chunks) == 2
+
+        # 3. Assert exactly one retransmission round occurred for seq 5 and seq 20
+        assert 5 in wrapped_sock.retransmitted_seqs
+        assert 20 in wrapped_sock.retransmitted_seqs
+        assert wrapped_sock.send_attempts[(img_id, 5)] == 2
+        assert wrapped_sock.send_attempts[(img_id, 20)] == 2
+
+        # 4. Assert receiver reassembled byte-for-byte identical image
+        assert img_id in received_container
+        assert received_container[img_id] == original_data
+
+        # 5. Assert CRC32 integrity check passes
+        assert compute_crc32(received_container[img_id]) == compute_crc32(original_data)
+    finally:
+        receiver.stop()
+
+
+def test_corrupted_chunk_dropped_and_recovered():
+    """
+    Validates Section 4: A corrupted chunk payload fails per-chunk CRC,
+    is dropped silently by the receiver, and recovered via NACK.
+    """
+    port = 5903
+    original_data = generate_synthetic_image(num_chunks=10)
+    img_id = 7003
+    received_container = {}
+
+    def on_recv(i_id, data, ts):
+        received_container[i_id] = data
+
+    receiver = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=port,
+        inactivity_timeout=0.2,
+        on_image_received=on_recv,
+    )
+    receiver.start()
+
+    raw_sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sender_sock.settimeout(0.5)
+
+    # Corrupt chunk 3 on attempt 1
+    wrapped_sock = FaultInjectingSocket(
+        real_sock=raw_sender_sock,
+        corrupt_chunks_on_attempt={3: 1},
+    )
+
+    try:
+        sender = SmokeAlertSender(
+            target_host="127.0.0.1",
+            target_port=port,
+            wait_timeout=0.5,
+            sock=wrapped_sock,
+        )
+
+        success = sender.send_image(img_id, original_data, "2026-10-07 10:10:00")
+        sender.close()
+
+        assert success is True
+        assert (img_id, 3) in wrapped_sock.corrupted_chunks
+        assert 3 in wrapped_sock.retransmitted_seqs
+        assert img_id in received_container
+        assert received_container[img_id] == original_data
+        assert compute_crc32(received_container[img_id]) == compute_crc32(original_data)
+    finally:
+        receiver.stop()
