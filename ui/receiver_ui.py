@@ -29,6 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from network.receiver.receiver import SmokeAlertReceiver
+from network.shared.protocol import get_local_ipv4_addresses
 
 
 class ReceiverApp(tk.Tk):
@@ -107,14 +108,19 @@ class ReceiverApp(tk.Tk):
         left_col = tk.Frame(main_paned, bg="#1a1c26", padx=12, pady=10)
         main_paned.add(left_col, minsize=560)
 
-        # Config row
+        # Config row 1: Host and Port inputs
         cfg_frame = tk.Frame(left_col, bg="#1a1c26")
-        cfg_frame.pack(fill=tk.X, pady=(0, 8))
+        cfg_frame.pack(fill=tk.X, pady=(0, 4))
 
-        tk.Label(cfg_frame, text="Listen Port:", bg="#1a1c26", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self.entry_port = tk.Entry(cfg_frame, width=7, font=("Segoe UI", 9), bg="#12131a", fg="#edf2f4", insertbackground="white")
+        tk.Label(cfg_frame, text="Bind Host:", bg="#1a1c26", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.entry_host = tk.Entry(cfg_frame, width=10, font=("Segoe UI", 9), bg="#12131a", fg="#edf2f4", insertbackground="white")
+        self.entry_host.insert(0, "0.0.0.0")
+        self.entry_host.pack(side=tk.LEFT, padx=(4, 10))
+
+        tk.Label(cfg_frame, text="Port:", bg="#1a1c26", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.entry_port = tk.Entry(cfg_frame, width=6, font=("Segoe UI", 9), bg="#12131a", fg="#edf2f4", insertbackground="white")
         self.entry_port.insert(0, "5005")
-        self.entry_port.pack(side=tk.LEFT, padx=(5, 15))
+        self.entry_port.pack(side=tk.LEFT, padx=(4, 12))
 
         self.btn_listen = tk.Button(
             cfg_frame,
@@ -139,6 +145,21 @@ class ReceiverApp(tk.Tk):
             command=self._save_current_image,
         )
         self.btn_save_img.pack(side=tk.RIGHT)
+
+        # Config row 2: LAN IP Address Info Banner
+        local_ips = get_local_ipv4_addresses()
+        lan_ip_str = ", ".join(local_ips) if local_ips else "127.0.0.1"
+        lan_info_frame = tk.Frame(left_col, bg="#1a1c26")
+        lan_info_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.lbl_lan_ip = tk.Label(
+            lan_info_frame,
+            text=f"🌐 Local LAN IPv4 for Sender: {lan_ip_str} (Port 5005)",
+            font=("Segoe UI", 9, "bold"),
+            fg="#4cc9f0",
+            bg="#1a1c26",
+        )
+        self.lbl_lan_ip.pack(side=tk.LEFT)
 
         # Alert Metadata Cards Box
         meta_box = tk.LabelFrame(
@@ -211,30 +232,59 @@ class ReceiverApp(tk.Tk):
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=scroll_y.set)
 
-    def _start_receiver(self):
+    def _start_receiver(self) -> bool:
+        host = self.entry_host.get().strip() if hasattr(self, "entry_host") else "0.0.0.0"
+        if not host:
+            host = "0.0.0.0"
+
+        port_str = self.entry_port.get().strip()
         try:
-            port = int(self.entry_port.get().strip())
+            port = int(port_str)
+            if not (1 <= port <= 65535):
+                raise ValueError("Out of range")
         except ValueError:
-            port = 5005
+            messagebox.showerror(
+                "Validation Error",
+                f"Invalid port '{port_str}'. Port must be an integer between 1 and 65535.",
+            )
+            return False
 
         if self.receiver:
             self.receiver.stop()
 
-        self.receiver = SmokeAlertReceiver(
-            listen_host="0.0.0.0",
-            listen_port=port,
-            inactivity_timeout=0.3,
-            max_retries=5,
-            on_image_received=self._on_image_arrived,
-            log_callback=self._append_log,
-        )
-        self.receiver.start()
-        self.is_listening = True
-        self._append_log(f"[INIT] Receiver listening on UDP 0.0.0.0:{port}")
+        try:
+            self.receiver = SmokeAlertReceiver(
+                listen_host=host,
+                listen_port=port,
+                inactivity_timeout=0.3,
+                max_retries=5,
+                on_image_received=self._on_image_arrived,
+                log_callback=self._append_log,
+            )
+            self.receiver.start()
+            self.is_listening = True
+
+            # Refresh displayed LAN IP banner
+            local_ips = get_local_ipv4_addresses()
+            lan_ip_str = ", ".join(local_ips) if local_ips else "127.0.0.1"
+            if hasattr(self, "lbl_lan_ip"):
+                self.lbl_lan_ip.config(
+                    text=f"🌐 Local LAN IPv4 for Sender: {lan_ip_str} (Port {port})"
+                )
+            return True
+        except Exception as e:
+            messagebox.showerror(
+                "Network Error",
+                f"Failed to bind Receiver socket to {host}:{port}.\nError: {e}",
+            )
+            self._append_log(f"[ERROR] Failed to bind to {host}:{port}: {e}")
+            return False
 
     def _restart_receiver(self):
-        self._start_receiver()
-        messagebox.showinfo("Receiver", f"Receiver restarted on port {self.entry_port.get().strip()}")
+        if self._start_receiver():
+            host = self.entry_host.get().strip() or "0.0.0.0"
+            port = self.entry_port.get().strip()
+            messagebox.showinfo("Receiver", f"Receiver successfully restarted on {host}:{port}")
 
     def _append_log(self, text: str):
         def _insert():

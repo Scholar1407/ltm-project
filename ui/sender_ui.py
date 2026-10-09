@@ -30,7 +30,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from network.sender.sender import SmokeAlertSender
 from network.sender.detector_bridge import DetectorBridge, DEFAULT_MODEL_PATH
-from network.shared.protocol import MAX_PAYLOAD
+from network.shared.protocol import MAX_PAYLOAD, parse_endpoints
 
 
 class SenderApp(tk.Tk):
@@ -96,22 +96,29 @@ class SenderApp(tk.Tk):
         )
         config_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Config Row 1: Target IP & Port
+        # Config Row 1: Receiver Endpoints (host:port list)
         cfg_r1 = tk.Frame(config_frame, bg="#242632")
         cfg_r1.pack(fill=tk.X, pady=3)
 
-        tk.Label(cfg_r1, text="Receiver IP:", bg="#242632", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self.entry_ip = tk.Entry(cfg_r1, width=14, font=("Segoe UI", 9), bg="#1e1e24", fg="#edf2f4", insertbackground="white")
-        self.entry_ip.insert(0, "127.0.0.1")
-        self.entry_ip.pack(side=tk.LEFT, padx=(5, 15))
+        tk.Label(cfg_r1, text="Receivers (host:port):", bg="#242632", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.entry_receivers = tk.Entry(cfg_r1, width=28, font=("Segoe UI", 9), bg="#1e1e24", fg="#edf2f4", insertbackground="white")
+        self.entry_receivers.insert(0, "127.0.0.1:5005")
+        self.entry_receivers.pack(side=tk.LEFT, padx=(5, 8))
 
-        tk.Label(cfg_r1, text="UDP Port:", bg="#242632", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self.entry_port = tk.Entry(cfg_r1, width=7, font=("Segoe UI", 9), bg="#1e1e24", fg="#edf2f4", insertbackground="white")
-        self.entry_port.insert(0, "5005")
-        self.entry_port.pack(side=tk.LEFT, padx=(5, 15))
+        self.btn_apply = tk.Button(
+            cfg_r1,
+            text="Apply",
+            font=("Segoe UI", 8, "bold"),
+            bg="#3a86ff",
+            fg="white",
+            relief=tk.FLAT,
+            padx=6,
+            command=self._apply_endpoints,
+        )
+        self.btn_apply.pack(side=tk.LEFT, padx=(0, 12))
 
         tk.Label(cfg_r1, text="Conf Thresh:", bg="#242632", fg="#edf2f4", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self.conf_scale = tk.Scale(cfg_r1, from_=0.1, to=0.9, resolution=0.05, orient=tk.HORIZONTAL, bg="#242632", fg="#edf2f4", highlightthickness=0, length=90)
+        self.conf_scale = tk.Scale(cfg_r1, from_=0.1, to=0.9, resolution=0.05, orient=tk.HORIZONTAL, bg="#242632", fg="#edf2f4", highlightthickness=0, length=80)
         self.conf_scale.set(0.50)
         self.conf_scale.pack(side=tk.LEFT, padx=5)
 
@@ -224,17 +231,39 @@ class SenderApp(tk.Tk):
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=scroll_y.set)
 
-    def _init_network_and_bridge(self):
-        """Initializes sender socket and bridge decoupling layer."""
-        host = self.entry_ip.get().strip() or "127.0.0.1"
+    def _validate_and_parse_endpoints(self) -> Optional[List[Tuple[str, int]]]:
+        """Validates host:port input string, returning list of (host, port) or None on error."""
+        raw = self.entry_receivers.get().strip()
+        if not raw:
+            messagebox.showerror(
+                "Validation Error",
+                "Receiver endpoint list cannot be empty.\nExample: 127.0.0.1:5005 or 192.168.1.20:5005, 192.168.1.21:5005",
+            )
+            return None
+
         try:
-            port = int(self.entry_port.get().strip())
-        except ValueError:
-            port = 5005
+            endpoints = parse_endpoints(raw, default_port=5005)
+            return endpoints
+        except ValueError as err:
+            messagebox.showerror(
+                "Validation Error",
+                f"Invalid receiver endpoint:\n{err}\n\nFormat: host:port (e.g. 192.168.1.20:5005)",
+            )
+            return None
+
+    def _init_network_and_bridge(self):
+        """Initializes sender socket and bridge decoupling layer for all endpoints."""
+        endpoints = self._validate_and_parse_endpoints()
+        if not endpoints:
+            endpoints = [("127.0.0.1", 5005)]
+
+        if self.bridge:
+            self.bridge.stop()
+        if self.sender:
+            self.sender.close()
 
         self.sender = SmokeAlertSender(
-            target_host=host,
-            target_port=port,
+            receivers=endpoints,
             log_callback=self._append_log,
         )
         self.bridge = DetectorBridge(
@@ -245,7 +274,18 @@ class SenderApp(tk.Tk):
             on_alert_triggered=self._on_bridge_alert,
         )
         self.bridge.start()
-        self._append_log(f"[INIT] Sender initialized -> target {host}:{port}")
+        ep_strs = [f"{h}:{p}" for h, p in endpoints]
+        self._append_log(f"[INIT] Sender initialized -> targeting {len(endpoints)} receiver(s): {', '.join(ep_strs)}")
+
+    def _apply_endpoints(self):
+        """Called when user clicks 'Apply' button to update receiver targets."""
+        endpoints = self._validate_and_parse_endpoints()
+        if not endpoints:
+            return
+
+        self._init_network_and_bridge()
+        summary = "\n".join(f"• {h}:{p}" for h, p in endpoints)
+        messagebox.showinfo("Config Updated", f"Active Target Receivers ({len(endpoints)}):\n{summary}")
 
     def _append_log(self, text: str):
         """Thread-safe log append to text widget."""

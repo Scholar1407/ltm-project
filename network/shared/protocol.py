@@ -5,11 +5,12 @@ Specification: prompt/smoke-alert-protocol-spec.md
 """
 
 from __future__ import annotations
+import socket
 import struct
 import sys
 import zlib
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 # Ensure stdout uses UTF-8 where possible on Windows
 if hasattr(sys.stdout, "reconfigure"):
@@ -156,10 +157,105 @@ def split_into_chunks(data: bytes, chunk_size: int = MAX_PAYLOAD) -> List[bytes]
 
 
 # -------------------------------------------------------------------------
+# Network Utilities (Standard socket only, no extra dependencies)
+# -------------------------------------------------------------------------
+
+def get_local_ipv4_addresses() -> List[str]:
+    """
+    Discovers all non-loopback IPv4 addresses bound to local network interfaces.
+    Uses socket only to remain zero-dependency.
+    """
+    ips = set()
+    try:
+        hostname = socket.gethostname()
+        _, _, addr_list = socket.gethostbyname_ex(hostname)
+        for ip in addr_list:
+            if ":" not in ip and not ip.startswith("127."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    try:
+        # UDP dummy connect to discover default gateway route outbound IP
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            outbound = s.getsockname()[0]
+            if outbound and not outbound.startswith("127."):
+                ips.add(outbound)
+    except Exception:
+        pass
+
+    res = sorted(list(ips))
+    return res if res else ["127.0.0.1"]
+
+
+def parse_endpoints(
+    raw_endpoints: Union[str, Iterable[str]], default_port: int = 5005
+) -> List[Tuple[str, int]]:
+    """
+    Parses endpoint strings into validated (host, port) tuples.
+    Accepts:
+      - String: "192.168.1.10:5005, 192.168.1.20:5005" or "192.168.1.10:5005"
+      - List/Iterable of strings: ["192.168.1.10:5005", "192.168.1.20"]
+    Raises ValueError with descriptive message upon invalid host or port.
+    """
+    if isinstance(raw_endpoints, str):
+        # Split by comma or whitespace
+        parts = [p.strip() for p in raw_endpoints.replace(",", " ").split() if p.strip()]
+    else:
+        parts = []
+        for item in raw_endpoints:
+            if isinstance(item, str):
+                parts.extend([p.strip() for p in item.replace(",", " ").split() if p.strip()])
+            elif isinstance(item, tuple) and len(item) == 2:
+                parts.append(f"{item[0]}:{item[1]}")
+
+    if not parts:
+        raise ValueError("No receiver endpoints specified.")
+
+    results: List[Tuple[str, int]] = []
+    for ep in parts:
+        if ":" in ep:
+            host_part, port_part = ep.rsplit(":", 1)
+            host = host_part.strip()
+            if not host:
+                raise ValueError(f"Invalid endpoint '{ep}': Host cannot be empty.")
+            try:
+                port = int(port_part.strip())
+            except ValueError:
+                raise ValueError(f"Invalid endpoint '{ep}': Port '{port_part}' is not an integer.")
+        else:
+            host = ep.strip()
+            port = default_port
+
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Invalid port {port} in '{ep}': Must be between 1 and 65535.")
+
+        target = (host, port)
+        if target not in results:
+            results.append(target)
+
+    return results
+
+
+# -------------------------------------------------------------------------
 # Structured Human-Readable Logging (Per Section 5 of Specification)
 # -------------------------------------------------------------------------
 
 LogCallback = Callable[[str], None]
+
+
+def format_peer_tag(peer: Optional[Union[Tuple[str, int], str]], direction: str = "->") -> str:
+    """Formats peer tag maintaining column alignment (e.g. '-> 192.168.1.20:5005 ')."""
+    if not peer:
+        return ""
+    if isinstance(peer, (tuple, list)):
+        raw = f"{direction} {peer[0]}:{peer[1]}"
+    else:
+        s = str(peer).strip()
+        raw = s if s.startswith(("->", "<-")) else f"{direction} {s}"
+    return f"{raw:<24}"
+
 
 def format_missing_seqs(missing: Iterable[int], max_items: int = 8) -> str:
     """Formats missing sequences with zero-padded 3-digit numbers."""
@@ -173,8 +269,16 @@ def format_missing_seqs(missing: Iterable[int], max_items: int = 8) -> str:
     return f"[{head},...(+{len(items)-max_items})]"
 
 
-def log_send_meta(img_id: int, total: int, crc: int, callback: Optional[LogCallback] = None) -> str:
-    line = f"[SEND] META   img_id={img_id:<5} total={total:<4} crc=0x{crc:08x}"
+def log_send_meta(
+    img_id: int,
+    total: int,
+    crc: int,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
+) -> str:
+    peer_tag = format_peer_tag(peer, "->")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[SEND] META   {gap}img_id={img_id:<5} total={total:<4} crc=0x{crc:08x}"
     safe_print(line)
     if callback:
         callback(line)
@@ -182,9 +286,17 @@ def log_send_meta(img_id: int, total: int, crc: int, callback: Optional[LogCallb
 
 
 def log_send_chunk(
-    img_id: int, seq: int, total: int, size: int, crc: int, callback: Optional[LogCallback] = None
+    img_id: int,
+    seq: int,
+    total: int,
+    size: int,
+    crc: int,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
-    line = f"[SEND] CHUNK  img_id={img_id:<5} seq={seq:03d}/{total:<3} size={size:<5}B crc=0x{crc:08x}"
+    peer_tag = format_peer_tag(peer, "->")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[SEND] CHUNK  {gap}img_id={img_id:<5} seq={seq:03d}/{total:<3} size={size:<5}B crc=0x{crc:08x}"
     safe_print(line)
     if callback:
         callback(line)
@@ -192,9 +304,15 @@ def log_send_chunk(
 
 
 def log_recv_chunk(
-    img_id: int, seq: int, total: int, callback: Optional[LogCallback] = None
+    img_id: int,
+    seq: int,
+    total: int,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
-    line = f"[RECV] CHUNK  img_id={img_id:<5} seq={seq:03d}/{total:<3} [OK]"
+    peer_tag = format_peer_tag(peer, "<-")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[RECV] CHUNK  {gap}img_id={img_id:<5} seq={seq:03d}/{total:<3} [OK]"
     safe_print(line)
     if callback:
         callback(line)
@@ -202,9 +320,16 @@ def log_recv_chunk(
 
 
 def log_drop_chunk(
-    img_id: int, seq: int, total: int, reason: str, callback: Optional[LogCallback] = None
+    img_id: int,
+    seq: int,
+    total: int,
+    reason: str,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
-    line = f"[DROP] CHUNK  img_id={img_id:<5} seq={seq:03d}/{total:<3} ({reason})"
+    peer_tag = format_peer_tag(peer, "<-")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[DROP] CHUNK  {gap}img_id={img_id:<5} seq={seq:03d}/{total:<3} ({reason})"
     safe_print(line)
     if callback:
         callback(line)
@@ -212,10 +337,15 @@ def log_drop_chunk(
 
 
 def log_send_nack(
-    img_id: int, missing: Iterable[int], callback: Optional[LogCallback] = None
+    img_id: int,
+    missing: Iterable[int],
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
     missing_str = format_missing_seqs(missing)
-    line = f"[SEND] NACK   img_id={img_id:<5} missing={missing_str}"
+    peer_tag = format_peer_tag(peer, "->")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[SEND] NACK   {gap}img_id={img_id:<5} missing={missing_str}"
     safe_print(line)
     if callback:
         callback(line)
@@ -223,10 +353,15 @@ def log_send_nack(
 
 
 def log_recv_nack(
-    img_id: int, missing: Iterable[int], callback: Optional[LogCallback] = None
+    img_id: int,
+    missing: Iterable[int],
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
     missing_str = format_missing_seqs(missing)
-    line = f"[RECV] NACK   img_id={img_id:<5} missing={missing_str} -> retransmitting"
+    peer_tag = format_peer_tag(peer, "<-")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[RECV] NACK   {gap}img_id={img_id:<5} missing={missing_str} -> retransmitting"
     safe_print(line)
     if callback:
         callback(line)
@@ -234,9 +369,14 @@ def log_recv_nack(
 
 
 def log_send_ack(
-    img_id: int, total: int, callback: Optional[LogCallback] = None
+    img_id: int,
+    total: int,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
-    line = f"[SEND] ACK    img_id={img_id:<5} -- transfer complete ({total}/{total})"
+    peer_tag = format_peer_tag(peer, "->")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[SEND] ACK    {gap}img_id={img_id:<5} -- transfer complete ({total}/{total})"
     safe_print(line)
     if callback:
         callback(line)
@@ -244,10 +384,16 @@ def log_send_ack(
 
 
 def log_recv_ack(
-    img_id: int, total: int, rounds: int, callback: Optional[LogCallback] = None
+    img_id: int,
+    total: int,
+    rounds: int,
+    callback: Optional[LogCallback] = None,
+    peer: Optional[Union[Tuple[str, int], str]] = None,
 ) -> str:
     round_text = "round" if rounds == 1 else "rounds"
-    line = f"[RECV] ACK    img_id={img_id:<5} -- transfer complete ({total}/{total}, {rounds} retransmit {round_text})"
+    peer_tag = format_peer_tag(peer, "<-")
+    gap = f"{peer_tag} " if peer_tag else ""
+    line = f"[RECV] ACK    {gap}img_id={img_id:<5} -- transfer complete ({total}/{total}, {rounds} retransmit {round_text})"
     safe_print(line)
     if callback:
         callback(line)

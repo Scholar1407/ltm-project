@@ -6,10 +6,16 @@ Specification: prompt/smoke-alert-protocol-spec.md Section 4 & Section 5
 
 from __future__ import annotations
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 try:
     from ..shared.protocol import (
@@ -17,6 +23,7 @@ try:
         Packet,
         PacketType,
         compute_crc32,
+        get_local_ipv4_addresses,
         log_drop_chunk,
         log_info,
         log_recv_chunk,
@@ -32,6 +39,7 @@ except (ImportError, ValueError):
         Packet,
         PacketType,
         compute_crc32,
+        get_local_ipv4_addresses,
         log_drop_chunk,
         log_info,
         log_recv_chunk,
@@ -105,7 +113,8 @@ class SmokeAlertReceiver:
             # Set short poll timeout so thread can periodically check inactivity timers
             self.sock.settimeout(0.05)
 
-        self.sessions: Dict[int, ReassemblySession] = {}
+        # Keyed by ((sender_ip, sender_port), img_id) to isolate concurrent streams from multiple senders
+        self.sessions: Dict[Tuple[Tuple[str, int], int], ReassemblySession] = {}
         self.running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -117,8 +126,14 @@ class SmokeAlertReceiver:
         self.running = True
         self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._worker_thread.start()
+
+        local_ips = get_local_ipv4_addresses()
         log_info(
-            f"Receiver started on {self.listen_host}:{self.listen_port} (inactivity={int(self.inactivity_timeout*1000)}ms)",
+            f"Receiver bound to {self.listen_host}:{self.listen_port} (inactivity={int(self.inactivity_timeout*1000)}ms)",
+            self.log_callback,
+        )
+        log_info(
+            f"Local IPv4 address(es) for LAN connections: {', '.join(local_ips)}",
             self.log_callback,
         )
 
@@ -170,11 +185,13 @@ class SmokeAlertReceiver:
             return
 
         with self._lock:
+            session_key = (addr, packet.img_id)
+
             # -------------------------------------------------------------
             # Case 1: META packet
             # -------------------------------------------------------------
             if packet.is_meta:
-                session = self.sessions.get(packet.img_id)
+                session = self.sessions.get(session_key)
                 if session and session.completed:
                     # If already completed, sender might have lost our ACK -> re-send ACK
                     self._send_ack(session, addr)
@@ -190,7 +207,7 @@ class SmokeAlertReceiver:
                         last_activity_time=now,
                         timestamp_meta=packet.payload.decode("utf-8", errors="replace"),
                     )
-                    self.sessions[packet.img_id] = session
+                    self.sessions[session_key] = session
                 else:
                     # Update metadata on existing session
                     session.sender_addr = addr
@@ -219,10 +236,11 @@ class SmokeAlertReceiver:
                         packet.total,
                         "corrupted crc",
                         self.log_callback,
+                        peer=addr,
                     )
                     return
 
-                session = self.sessions.get(packet.img_id)
+                session = self.sessions.get(session_key)
                 if not session:
                     # Chunk arrived before META
                     session = ReassemblySession(
@@ -233,7 +251,7 @@ class SmokeAlertReceiver:
                         chunks=[None] * packet.total,
                         last_activity_time=now,
                     )
-                    self.sessions[packet.img_id] = session
+                    self.sessions[session_key] = session
 
                 if session.completed:
                     # Already completed session: acknowledge sender
@@ -246,7 +264,11 @@ class SmokeAlertReceiver:
                     session.last_activity_time = now
                     session.sender_addr = addr
                     log_recv_chunk(
-                        packet.img_id, packet.seq, session.total, self.log_callback
+                        packet.img_id,
+                        packet.seq,
+                        session.total,
+                        self.log_callback,
+                        peer=addr,
                     )
 
                 # Check for completion
@@ -280,7 +302,7 @@ class SmokeAlertReceiver:
         else:
             # End-to-end CRC mismatch: request full resend via NACK
             log_info(
-                f"[CRC-FAIL] img_id={session.img_id} expected=0x{session.expected_crc32:08x} got=0x{calculated_whole_crc:08x}. Requesting full resend.",
+                f"[CRC-FAIL] img_id={session.img_id} from {addr} expected=0x{session.expected_crc32:08x} got=0x{calculated_whole_crc:08x}. Requesting full resend.",
                 self.log_callback,
             )
             # Reset chunks
@@ -296,7 +318,7 @@ class SmokeAlertReceiver:
             crc32=session.expected_crc32 or 0,
         )
         self.sock.sendto(ack_pkt, addr)
-        log_send_ack(session.img_id, session.total, self.log_callback)
+        log_send_ack(session.img_id, session.total, self.log_callback, peer=addr)
 
     def _send_nack(
         self, session: ReassemblySession, missing_seqs: List[int], addr: Tuple[str, int]
@@ -311,12 +333,12 @@ class SmokeAlertReceiver:
             payload=nack_payload,
         )
         self.sock.sendto(nack_pkt, addr)
-        log_send_nack(session.img_id, missing_seqs, self.log_callback)
+        log_send_nack(session.img_id, missing_seqs, self.log_callback, peer=addr)
 
     def _check_session_timeouts(self, now: float):
         """Scans pending sessions; sends NACK when inactivity window is exceeded."""
         with self._lock:
-            for img_id, session in list(self.sessions.items()):
+            for session_key, session in list(self.sessions.items()):
                 if session.completed:
                     continue
 
@@ -331,12 +353,13 @@ class SmokeAlertReceiver:
                         session.last_activity_time = now
                         self._send_nack(session, missing, session.sender_addr)
                     else:
+                        sender_addr, img_id = session_key
                         log_info(
-                            f"[TIMEOUT] img_id={img_id} exceeded max NACK attempts ({self.max_retries}). Discarding incomplete session.",
+                            f"[TIMEOUT] img_id={img_id} from {sender_addr} exceeded max NACK attempts ({self.max_retries}). Discarding incomplete session.",
                             self.log_callback,
                         )
                         # Clean up failed session
-                        del self.sessions[img_id]
+                        del self.sessions[session_key]
 
 
 if __name__ == "__main__":

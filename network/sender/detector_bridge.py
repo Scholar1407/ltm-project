@@ -20,13 +20,16 @@ from typing import Callable, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
+# Project paths
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 try:
     from .sender import SmokeAlertSender
 except (ImportError, ValueError):
     from network.sender.sender import SmokeAlertSender
 
-# Project paths
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MODEL_PATH = BASE_DIR / "model" / "weights" / "smoke_p2" / "best.pt"
 
 # Tuning parameters per Section 9
@@ -277,14 +280,21 @@ if __name__ == "__main__":
     parser.add_argument("--source", default="0", help="Webcam index (0) or path to video file")
     parser.add_argument("--host", default="127.0.0.1", help="Receiver IP")
     parser.add_argument("--port", type=int, default=5005, help="Receiver port")
+    parser.add_argument(
+        "--receivers",
+        nargs="*",
+        default=None,
+        help="List of receiver endpoints (e.g. --receivers 127.0.0.1:5005 192.168.1.20:5005)",
+    )
     parser.add_argument("--model", default=str(DEFAULT_MODEL_PATH), help="Model weights path")
     parser.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     parser.add_argument("--cooldown", type=float, default=8.0, help="Cooldown in seconds")
     args = parser.parse_args()
 
     src: Union[int, str] = int(args.source) if args.source.isdigit() else args.source
+    endpoints = args.receivers if args.receivers else [f"{args.host}:{args.port}"]
 
-    sender = SmokeAlertSender(target_host=args.host, target_port=args.port)
+    sender = SmokeAlertSender(receivers=endpoints)
     bridge = DetectorBridge(
         sender=sender,
         model_path=args.model,

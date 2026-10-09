@@ -297,3 +297,153 @@ def test_corrupted_chunk_dropped_and_recovered():
         assert compute_crc32(received_container[img_id]) == compute_crc32(original_data)
     finally:
         receiver.stop()
+
+
+def test_multi_receiver_selective_loss():
+    """
+    Task 2 requirement:
+    Two receivers running concurrently:
+    - Receiver 1 operates over a clean link (0 dropped packets, 0 retransmissions).
+    - Receiver 2 operates over a lossy link with deterministic drops on seq 4 and seq 12.
+    Asserts:
+    - Both receivers end up with byte-identical reassembled images matching original.
+    - Both pass CRC32 integrity check.
+    - Only the lossy receiver's worker performed a retransmit round.
+    """
+    port1 = 5911
+    port2 = 5912
+    original_data = generate_synthetic_image(num_chunks=20)
+    img_id = 8001
+    recv1_container = {}
+    recv2_container = {}
+
+    def on_recv1(i_id, data, ts):
+        recv1_container[i_id] = data
+
+    def on_recv2(i_id, data, ts):
+        recv2_container[i_id] = data
+
+    receiver1 = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=port1,
+        inactivity_timeout=0.2,
+        on_image_received=on_recv1,
+    )
+    receiver2 = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=port2,
+        inactivity_timeout=0.2,
+        on_image_received=on_recv2,
+    )
+
+    receiver1.start()
+    receiver2.start()
+
+    # Track sockets per receiver endpoint
+    raw_sock1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sock1.settimeout(0.5)
+    wrapped_sock1 = FaultInjectingSocket(real_sock=raw_sock1)
+
+    raw_sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    raw_sock2.settimeout(0.5)
+    wrapped_sock2 = FaultInjectingSocket(
+        real_sock=raw_sock2,
+        drop_chunks_on_attempt={4: 1, 12: 1},
+    )
+
+    socket_map = {
+        ("127.0.0.1", port1): wrapped_sock1,
+        ("127.0.0.1", port2): wrapped_sock2,
+    }
+
+    def sock_factory(endpoint: Tuple[str, int]) -> socket.socket:
+        return socket_map[endpoint]
+
+    try:
+        sender = SmokeAlertSender(
+            receivers=[("127.0.0.1", port1), ("127.0.0.1", port2)],
+            wait_timeout=0.5,
+            sock_factory=sock_factory,
+        )
+
+        success = sender.send_image(img_id, original_data, "2026-10-08 14:00:00")
+        sender.close()
+
+        # 1. Overall fan-out success
+        assert success is True
+        assert sender.last_results[("127.0.0.1", port1)] is True
+        assert sender.last_results[("127.0.0.1", port2)] is True
+
+        # 2. Both receivers received byte-identical images
+        assert img_id in recv1_container
+        assert recv1_container[img_id] == original_data
+        assert compute_crc32(recv1_container[img_id]) == compute_crc32(original_data)
+
+        assert img_id in recv2_container
+        assert recv2_container[img_id] == original_data
+        assert compute_crc32(recv2_container[img_id]) == compute_crc32(original_data)
+
+        # 3. Clean link to receiver 1: 0 drops, 0 retransmissions
+        assert len(wrapped_sock1.dropped_chunks) == 0
+        assert len(wrapped_sock1.retransmitted_seqs) == 0
+
+        # 4. Lossy link to receiver 2: dropped seq 4 and 12, exactly retransmitted seq 4 and 12
+        assert (img_id, 4) in wrapped_sock2.dropped_chunks
+        assert (img_id, 12) in wrapped_sock2.dropped_chunks
+        assert 4 in wrapped_sock2.retransmitted_seqs
+        assert 12 in wrapped_sock2.retransmitted_seqs
+        assert wrapped_sock2.send_attempts[(img_id, 4)] == 2
+        assert wrapped_sock2.send_attempts[(img_id, 12)] == 2
+
+    finally:
+        receiver1.stop()
+        receiver2.stop()
+        raw_sock1.close()
+        raw_sock2.close()
+
+
+def test_multi_receiver_dead_node_tolerance():
+    """
+    Task 2 requirement:
+    Killing one receiver does not stop or block delivery to the other.
+    Target 1: Active receiver (port 5915)
+    Target 2: Dead receiver (port 5916, nobody listening)
+    """
+    alive_port = 5915
+    dead_port = 5916
+    original_data = generate_synthetic_image(num_chunks=10)
+    img_id = 8002
+    alive_container = {}
+
+    def on_recv(i_id, data, ts):
+        alive_container[i_id] = data
+
+    receiver = SmokeAlertReceiver(
+        listen_host="127.0.0.1",
+        listen_port=alive_port,
+        inactivity_timeout=0.2,
+        on_image_received=on_recv,
+    )
+    receiver.start()
+
+    try:
+        sender = SmokeAlertSender(
+            receivers=[("127.0.0.1", alive_port), ("127.0.0.1", dead_port)],
+            wait_timeout=0.2,
+            max_retries=1,  # Short retry count so dead worker terminates quickly
+        )
+
+        success = sender.send_image(img_id, original_data, "2026-10-08 14:05:00")
+        sender.close()
+
+        # Surviving receiver gets complete image regardless of dead receiver
+        assert success is True
+        assert sender.last_results[("127.0.0.1", alive_port)] is True
+        assert sender.last_results[("127.0.0.1", dead_port)] is False
+        assert img_id in alive_container
+        assert alive_container[img_id] == original_data
+        assert compute_crc32(alive_container[img_id]) == compute_crc32(original_data)
+
+    finally:
+        receiver.stop()
+
