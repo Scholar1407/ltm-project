@@ -341,8 +341,6 @@ class SmokeAlertSender:
 
 if __name__ == "__main__":
     import argparse
-    import cv2
-    import numpy as np
 
     parser = argparse.ArgumentParser(description="SAP Smoke Alert Protocol Sender CLI")
     parser.add_argument("--host", default="127.0.0.1", help="Default receiver IP address")
@@ -364,30 +362,10 @@ if __name__ == "__main__":
         with open(args.image, "rb") as f:
             img_bytes = f.read()
     else:
-        # Create synthetic test alert image with OpenCV
-        test_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        test_frame[:] = (30, 30, 30)
-        cv2.putText(
-            test_frame,
-            "TEST SMOKING ALERT (SAP DEMO)",
-            (50, 200),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 0, 255),
-            2,
-        )
-        t_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(
-            test_frame,
-            f"TIMESTAMP: {t_str}",
-            (50, 260),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 255),
-            2,
-        )
-        _, enc = cv2.imencode(".jpg", test_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        img_bytes = enc.tobytes()
+        # Generate synthetic test frame data without external dependencies (no cv2/numpy)
+        header = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xFF\xDB\x00C\x00"
+        body = (f"TEST_SMOKING_ALERT_FRAME_{time.strftime('%Y-%m-%d_%H:%M:%S')}_".encode("utf-8") * 350)
+        img_bytes = header + body + b"\xFF\xD9"
 
     sender = SmokeAlertSender(receivers=endpoints)
     test_id = int(time.time()) % 10000

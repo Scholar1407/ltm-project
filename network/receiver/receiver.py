@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -77,6 +77,7 @@ class ReassemblySession:
 
 
 ImageReceivedCallback = Callable[[int, bytes, str], None]
+TransferCompleteCallback = Callable[[Tuple[str, int], int, bytes, Dict[str, Any]], None]
 LogCallback = Callable[[str], None]
 
 
@@ -95,6 +96,7 @@ class SmokeAlertReceiver:
         max_retries: int = 5,
         sock: Optional[socket.socket] = None,
         on_image_received: Optional[ImageReceivedCallback] = None,
+        on_transfer_complete: Optional[TransferCompleteCallback] = None,
         log_callback: Optional[LogCallback] = None,
     ):
         self.listen_host = listen_host
@@ -102,6 +104,7 @@ class SmokeAlertReceiver:
         self.inactivity_timeout = inactivity_timeout
         self.max_retries = max_retries
         self.on_image_received = on_image_received
+        self.on_transfer_complete = on_transfer_complete
         self.log_callback = log_callback
 
         self._own_socket = sock is None
@@ -287,7 +290,7 @@ class SmokeAlertReceiver:
             session.completed = True
             session.full_image_bytes = full_image
 
-            # Trigger notification callback before acknowledging sender
+            # Trigger notification callbacks before acknowledging sender
             if self.on_image_received:
                 try:
                     self.on_image_received(
@@ -296,6 +299,21 @@ class SmokeAlertReceiver:
                 except Exception as e:
                     log_info(
                         f"Error in on_image_received callback: {e}", self.log_callback
+                    )
+
+            if self.on_transfer_complete:
+                try:
+                    stats = {
+                        "total": session.total,
+                        "crc32": session.expected_crc32,
+                        "nack_attempts": session.nack_attempts,
+                        "size": len(full_image),
+                        "timestamp": session.timestamp_meta,
+                    }
+                    self.on_transfer_complete(addr, session.img_id, full_image, stats)
+                except Exception as e:
+                    log_info(
+                        f"Error in on_transfer_complete callback: {e}", self.log_callback
                     )
 
             self._send_ack(session, addr)
@@ -364,8 +382,7 @@ class SmokeAlertReceiver:
 
 if __name__ == "__main__":
     import argparse
-    import cv2
-    import numpy as np
+    import os
 
     parser = argparse.ArgumentParser(description="SAP Smoke Alert Protocol Receiver CLI")
     parser.add_argument("--host", default="0.0.0.0", help="Listen IP address")

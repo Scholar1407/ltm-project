@@ -180,17 +180,19 @@ Chạy lệnh kiểm thử tự động toàn diện:
 .venv\Scripts\python.exe -m pytest -v network/tests/test_reliability.py
 ```
 
-Kết quả kỳ vọng (100% Passed - 7/7 tests):
+Kết quả kỳ vọng (100% Passed - 9/9 tests):
 ```
-network/tests/test_reliability.py::test_protocol_pack_unpack PASSED               [ 14%]
-network/tests/test_reliability.py::test_nack_payload_serialization PASSED        [ 28%]
-network/tests/test_reliability.py::test_happy_path_transmission PASSED            [ 42%]
-network/tests/test_reliability.py::test_selective_loss_and_nack_retransmission PASSED [ 57%]
-network/tests/test_reliability.py::test_corrupted_chunk_dropped_and_recovered PASSED  [ 71%]
-network/tests/test_reliability.py::test_multi_receiver_selective_loss PASSED      [ 85%]
-network/tests/test_reliability.py::test_multi_receiver_dead_node_tolerance PASSED [100%]
+network/tests/test_reliability.py::test_protocol_pack_unpack PASSED               [ 11%]
+network/tests/test_reliability.py::test_nack_payload_serialization PASSED        [ 22%]
+network/tests/test_reliability.py::test_happy_path_transmission PASSED            [ 33%]
+network/tests/test_reliability.py::test_selective_loss_and_nack_retransmission PASSED [ 44%]
+network/tests/test_reliability.py::test_corrupted_chunk_dropped_and_recovered PASSED  [ 55%]
+network/tests/test_reliability.py::test_multi_receiver_selective_loss PASSED      [ 66%]
+network/tests/test_reliability.py::test_multi_receiver_dead_node_tolerance PASSED [ 77%]
+network/tests/test_reliability.py::test_stdlib_only_imports_in_cores PASSED       [ 88%]
+network/tests/test_reliability.py::test_cli_loopback_and_notify_cmd PASSED       [100%]
 
-============================== 7 passed in 1.74s ==============================
+============================== 9 passed in 3.36s ==============================
 ```
 
 *Các ca kiểm thử tự động chứng minh:*
@@ -198,6 +200,8 @@ network/tests/test_reliability.py::test_multi_receiver_dead_node_tolerance PASSE
 - `test_corrupted_chunk_dropped_and_recovered`: Giả lập payload bị biến đổi bit (bit flip), Receiver phát hiện sai CRC chunk và drop ngay tại tầng socket, sau đó tự hồi phục qua NACK.
 - `test_multi_receiver_selective_loss`: Sender phát ảnh tới 2 Receiver đồng thời; Receiver 1 đường truyền sạch (0 retransmission), Receiver 2 bị rớt gói; cả 2 đều nhận ảnh toàn vẹn và chỉ Receiver 2 thực hiện retransmit.
 - `test_multi_receiver_dead_node_tolerance`: Sender gửi cho 2 Receiver trong đó 1 Receiver đã chết/tắt nguồn; trạm sống vẫn nhận trọn vẹn ảnh mà không bị treo hay nghẽn.
+- `test_stdlib_only_imports_in_cores`: Xác thực toàn bộ core và CLI chỉ phụ thuộc vào thư viện chuẩn (stdlib) của Python, hoạt động hoàn hảo khi chặn hoàn toàn tkinter, cv2, numpy, PIL và ultralytics.
+- `test_cli_loopback_and_notify_cmd`: Kiểm thử toàn vẹn cả Receiver CLI và Sender CLI qua loopback với file JPEG mẫu và cơ chế thực thi `--notify-cmd` kèm thay thế tham số.
 
 ---
 
@@ -266,3 +270,73 @@ Khi được hỏi về khả năng mở rộng trong tương lai, nêu trung th
 3. **Chưa có Encryption / Authentication:** Dữ liệu payload truyền dạng nhị phân rõ ràng, chưa mã hóa AES/TLS và chưa có chữ ký số xác thực danh tính để chống kẻ xấu giả mạo gói tin cảnh báo (spoofing).
 4. **Đa trạm bằng Multiple Unicast:** Hiện tại việc gửi cho nhiều trạm nhận (building-wide notification) được thực hiện bằng mô hình 1 socket / 1 worker độc lập cho từng trạm nhận (N-unicast sockets). Chưa tối ưu bằng IP Multicast ở tầng mạng.
 5. **Cơ chế Selective-NACK ARQ đơn giản hóa:** Phụ thuộc vào các mốc timeout tĩnh (inactivity 300ms, wait window 500ms), chưa tính toán và cập nhật thời gian RTT động (Round-Trip Time Estimation) như TCP RTO.
+
+---
+
+## 📱 6. Phụ Lục: Kiểm Thử Với Điện Thoại Thay Cho Laptop Thứ Hai (Test with a Phone Instead of a 2nd Laptop)
+
+Nhờ kiến trúc tách rời (Headless CLI Core chỉ dùng thư viện chuẩn Python `stdlib`), hệ thống SAP có thể chạy trực tiếp trên **điện thoại Android (qua Termux)** để đóng vai trò làm trạm nhận (Receiver) hoặc trạm gửi (Sender) độc lập khi bạn chưa có sẵn chiếc laptop thứ hai để kiểm thử mạng LAN.
+
+### Bước 1: Cài đặt môi trường trên điện thoại (Termux)
+1. Tải và cài đặt ứng dụng **Termux** từ [F-Droid](https://f-droid.org/en/packages/com.termux/) hoặc [GitHub Releases](https://github.com/termux/termux-app/releases) *(Lưu ý: Không cài từ Google Play Store vì bản đó đã ngừng cập nhật từ lâu)*.
+2. Mở Termux và cài đặt Python:
+   ```bash
+   pkg update && pkg install python
+   ```
+3. *(Tùy chọn nhận thông báo pop-up)*: Cài ứng dụng **Termux:API** trên điện thoại và cài gói bổ trợ trong terminal:
+   ```bash
+   pkg install termux-api
+   ```
+4. Chạy lệnh chống ngủ ngầm (giúp Termux tiếp tục lắng nghe UDP khi tắt màn hình):
+   ```bash
+   termux-wake-lock
+   ```
+
+### Bước 2: Chuyển mã nguồn và khởi động Receiver CLI trên điện thoại
+1. Copy thư mục `network/` của dự án vào bộ nhớ máy hoặc Termux (chỉ cần các file mạng: `network/__init__.py`, `network/shared/`, `network/receiver/`, `network/sender/`).
+2. Xem địa chỉ IP của điện thoại trong mạng Wi-Fi:
+   ```bash
+   ip addr
+   ```
+   *(Tìm dòng `inet` thuộc interface `wlan0`, ví dụ: `192.168.1.50`)*.
+3. Chạy Receiver CLI chế độ dòng lệnh:
+   ```bash
+   python -m network.receiver.cli --bind 0.0.0.0 --port 5005 --out received/ --notify-cmd "termux-notification --title '🚨 CANH BAO HUT THUOC!' --content 'Phat hien hut thuoc! Event #{img_id}' --image-path '{path}' --action 'termux-open {path}'"
+   ```
+   - CLI sẽ in ra các IP khả dụng và chờ gói tin trên cổng `5005`.
+   - Mỗi khi nhận ảnh hoàn tất, ảnh JPEG tự động lưu vào `received/`, bắn thông báo Android hiển thị trực tiếp ảnh chụp hiện trường trên màn hình notification, và bấm vào thông báo sẽ tự động mở xem ảnh toàn màn hình!
+
+### Bước 3: Chiều kiểm thử xuôi (Forward Test: Laptop gửi -> Điện thoại nhận)
+1. Trên Laptop, mở `ui/sender_ui.py`.
+2. Trong ô **Receivers (host:port)**, nhập IP của điện thoại: `192.168.1.50:5005`, bấm **Apply**.
+3. Bấm **🚨 Trigger Alert Frame**.
+4. **Hiện tượng quan sát:** 
+   - Trên Laptop: Terminal hiển thị `[SEND] META` và các gói `[SEND] CHUNK -> 192.168.1.50:5005`.
+   - Trên Điện thoại: Màn hình Termux cuộn log `[RECV] CHUNK`, xác thực CRC32 thành công, lưu file ảnh vào `received/` và chuông/thông báo Android rung lên tức thì.
+   - Bật Wireshark hoặc Clumsy trên laptop để quan sát cơ chế retransmission khi mạng rớt gói.
+
+### Bước 4: Chiều kiểm thử ngược (Reverse Test: Điện thoại gửi -> Laptop nhận)
+Kiểm tra xem laptop đã cấu hình mở Firewall đúng chưa bằng cách để điện thoại làm Sender:
+1. Trên Laptop, khởi chạy `ui/receiver_ui.py` (Laptop lắng nghe trên port 5005).
+2. Trên Điện thoại, chạy Sender CLI với một ảnh JPEG có sẵn (ví dụ ảnh chụp camera `sample.jpg`):
+   ```bash
+   python -m network.sender.cli --to 192.168.1.X:5005 --send-file sample.jpg
+   ```
+   *(Thay `192.168.1.X` bằng địa chỉ LAN IP của laptop)*.
+3. **Hiện tượng quan sát:**
+   - Nếu Laptop UI lập tức nhấp nháy đỏ và hiển thị ảnh: Windows Firewall trên laptop đã được mở đúng quy tắc.
+   - Nếu Sender CLI trên điện thoại báo timeout/retry: Laptop đang bị Firewall chặn gói tin UDP vào cổng 5005.
+
+### Bước 5: Biến thể dùng Wi-Fi Hotspot (Hotspot Variant - Tránh AP Isolation)
+Nếu Wi-Fi tại trường học bật chế độ AP/Client Isolation (chặn các thiết bị giao tiếp nội bộ):
+- Trên điện thoại, bật tính năng **Điểm phát sóng di động (Mobile Hotspot)**.
+- Cho Laptop kết nối vào mạng Wi-Fi của điện thoại.
+- Địa chỉ IP của điện thoại lúc này thường là IP Gateway mặc định: `192.168.43.1`.
+- Giao thức SAP truyền mượt mà 100% không lo bị chặn cổng hay cô lập mạng.
+
+### ⚠️ Lưu ý quan trọng: Những gì phương pháp này KHÔNG kiểm tra được
+Thử nghiệm với điện thoại là giải pháp thay thế tuyệt vời để kiểm tra logic mạng LAN và tính năng CLI không phụ thuộc GUI. Tuy nhiên, phương pháp này **không thể kiểm tra:**
+- Cấu hình Windows Firewall trên chiếc laptop thứ hai của bạn học.
+- Môi trường cài đặt Python, Tkinter và độ phân giải màn hình trên chiếc laptop thứ hai.
+- Vì vậy, **trước ngày bảo vệ chính thức**, nhóm vẫn bắt buộc phải thực hiện tổng duyệt (dry-run) một lần trên đúng 2 chiếc laptop thật theo Checklist ở Mục 2.
+

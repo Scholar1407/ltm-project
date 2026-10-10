@@ -10,6 +10,9 @@ Deterministic testing using socket-layer fault injection:
 - CRC32 integrity validation
 """
 
+from pathlib import Path
+import subprocess
+import sys
 import socket
 import threading
 import time
@@ -446,4 +449,132 @@ def test_multi_receiver_dead_node_tolerance():
 
     finally:
         receiver.stop()
+
+
+def test_stdlib_only_imports_in_cores():
+    """
+    Task 4 requirement:
+    Verify network/receiver/receiver.py, network/sender/sender.py,
+    network/receiver/cli.py, and network/sender/cli.py import only
+    standard library + network.shared.protocol.
+    Asserts that blocking tkinter, cv2, numpy, PIL, and ultralytics does not prevent import.
+    """
+    probe_code = (
+        "import sys\n"
+        "for mod in ['tkinter', 'cv2', 'numpy', 'PIL', 'ultralytics']:\n"
+        "    sys.modules[mod] = None\n"
+        "import network.receiver.receiver\n"
+        "import network.sender.sender\n"
+        "import network.receiver.cli\n"
+        "import network.sender.cli\n"
+        "import network.shared.protocol\n"
+        "print('SUCCESS')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe_code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Import failed under blocked external modules: {result.stderr}"
+    assert "SUCCESS" in result.stdout
+
+
+def test_cli_loopback_and_notify_cmd(tmp_path):
+    """
+    Task 4 requirement:
+    Runs receiver CLI and sender CLI over loopback with a temp directory.
+    Asserts:
+    - --send-file delivers a byte-identical JPEG.
+    - --notify-cmd fires once per completed transfer with substituted placeholders.
+    """
+    port = 5930
+    out_dir = tmp_path / "received"
+    sample_file = tmp_path / "sample.jpg"
+    test_data = (
+        b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xFF\xDB\x00C\x00"
+        + (b"CLI_TEST_JPEG_DATA_" * 250)
+        + b"\xFF\xD9"
+    )
+    sample_file.write_bytes(test_data)
+
+    notif_file = tmp_path / "notified.txt"
+    helper_script = tmp_path / "record.py"
+    helper_script.write_text(
+        "import sys\n"
+        "with open(sys.argv[1], 'a', encoding='utf-8') as f:\n"
+        "    f.write(f'{sys.argv[2]}|{sys.argv[3]}|{sys.argv[4]}\\n')\n",
+        encoding="utf-8",
+    )
+
+    notify_template = (
+        f'"{sys.executable}" "{helper_script.resolve()}" "{notif_file.resolve()}" '
+        f'"{{path}}" "{{img_id}}" "{{sender}}"'
+    )
+
+    # Launch receiver CLI as a background subprocess
+    rcv_proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "network.receiver.cli",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--out",
+            str(out_dir),
+            "--notify-cmd",
+            notify_template,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        time.sleep(0.6)  # Allow socket to bind and start loop
+
+        # Run sender CLI
+        snd_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "network.sender.cli",
+                "--to",
+                f"127.0.0.1:{port}",
+                "--send-file",
+                str(sample_file),
+                "--img-id",
+                "9050",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert snd_result.returncode == 0, f"Sender CLI failed: {snd_result.stderr}"
+
+        # Wait briefly for notify subprocess to finish writing
+        time.sleep(0.6)
+
+        # 1. Assert received file matches byte-for-byte
+        received_files = list(out_dir.glob("*_9050.jpg"))
+        assert len(received_files) == 1
+        assert received_files[0].read_bytes() == test_data
+
+        # 2. Assert notify command was triggered with placeholders substituted
+        assert notif_file.exists()
+        log_lines = notif_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(log_lines) == 1
+        saved_path, img_id_str, sender_ep = log_lines[0].split("|")
+        assert img_id_str == "9050"
+        assert "127.0.0.1" in sender_ep
+        assert Path(saved_path).resolve() == received_files[0].resolve()
+
+    finally:
+        rcv_proc.terminate()
+        try:
+            rcv_proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            rcv_proc.kill()
+
 
