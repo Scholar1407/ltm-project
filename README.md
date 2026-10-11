@@ -1,4 +1,4 @@
-# 🚬 Smoke Alert System — Tòa Nhà Thông Minh
+# 🚬 Smoke Alert System — Hệ thống thông báo khẩn cấp tòa nhà văn phòng
 ### Phát Hiện Hành Vi Hút Thuốc & Cảnh Báo Khẩn Cấp Qua Giao Thức Mạng Tùy Biến (Smoke Alert Protocol - SAP)
 
 **Học phần:** Lập trình mạng (Network Programming)  
