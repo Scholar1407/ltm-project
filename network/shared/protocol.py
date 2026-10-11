@@ -40,15 +40,27 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 19 bytes
 MAGIC = b"SAP1"
 
 class PacketType:
-    META = 1   # Announces an incoming image transfer
-    CHUNK = 2  # One fragment of image data
-    ACK = 3    # Receiver confirms full image reassembled + CRC verified
-    NACK = 4   # Receiver requests retransmission of specific seq numbers
+    META = 1     # Announces an incoming image transfer
+    CHUNK = 2    # One fragment of image data
+    ACK = 3      # Receiver confirms full image reassembled + CRC verified
+    NACK = 4     # Receiver requests retransmission of specific seq numbers
+    BEACON = 5   # receiver -> broadcast: "I am listening on port X"
+    PROBE = 6    # sender -> broadcast: "Who is listening?"
 
     @classmethod
     def name(cls, ptype: int) -> str:
-        names = {cls.META: "META", cls.CHUNK: "CHUNK", cls.ACK: "ACK", cls.NACK: "NACK"}
+        names = {
+            cls.META: "META",
+            cls.CHUNK: "CHUNK",
+            cls.ACK: "ACK",
+            cls.NACK: "NACK",
+            cls.BEACON: "BEACON",
+            cls.PROBE: "PROBE",
+        }
         return names.get(ptype, f"UNKNOWN({ptype})")
+
+# Port dedicated to SAP auto-discovery (decoupled from data port 5005)
+DISCOVERY_PORT = 5006
 
 # Safe UDP payload limit to avoid IP fragmentation (1400B payload + 19B header = 1419B <= 1472B)
 MAX_PAYLOAD = 1400
@@ -79,6 +91,14 @@ class Packet:
     @property
     def is_nack(self) -> bool:
         return self.pkt_type == PacketType.NACK
+
+    @property
+    def is_beacon(self) -> bool:
+        return self.pkt_type == PacketType.BEACON
+
+    @property
+    def is_probe(self) -> bool:
+        return self.pkt_type == PacketType.PROBE
 
 
 def compute_crc32(data: bytes) -> int:

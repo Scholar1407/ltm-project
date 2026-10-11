@@ -10,6 +10,7 @@ Deterministic testing using socket-layer fault injection:
 - CRC32 integrity validation
 """
 
+import queue
 from pathlib import Path
 import subprocess
 import sys
@@ -33,7 +34,8 @@ from network.shared.protocol import (
     unpack_packet,
 )
 from network.sender.sender import SmokeAlertSender
-from network.receiver.receiver import SmokeAlertReceiver
+from network.sender.discovery import DiscoveryListener
+from network.receiver.receiver import DiscoveryBeaconThread, SmokeAlertReceiver
 
 
 class FaultInjectingSocket:
@@ -467,6 +469,7 @@ def test_stdlib_only_imports_in_cores():
         "import network.sender.sender\n"
         "import network.receiver.cli\n"
         "import network.sender.cli\n"
+        "import network.sender.discovery\n"
         "import network.shared.protocol\n"
         "print('SUCCESS')\n"
     )
@@ -576,5 +579,173 @@ def test_cli_loopback_and_notify_cmd(tmp_path):
             rcv_proc.wait(timeout=1.5)
         except subprocess.TimeoutExpired:
             rcv_proc.kill()
+
+
+class MockDiscoverySocket:
+    """Mock UDP socket simulating LAN broadcast discovery exchanges."""
+
+    def __init__(self, beacon_sender_ip: str = "192.168.1.77", beacon_data_port: int = 5005):
+        self.beacon_sender_ip = beacon_sender_ip
+        self.beacon_data_port = beacon_data_port
+        self.sent_packets: List[Tuple[bytes, Tuple[str, int]]] = []
+        self.recv_queue: queue.Queue = queue.Queue()
+        self.closed = False
+
+    def setsockopt(self, *args, **kwargs):
+        pass
+
+    def bind(self, addr):
+        pass
+
+    def settimeout(self, timeout):
+        pass
+
+    def sendto(self, data: bytes, addr: Tuple[str, int]):
+        self.sent_packets.append((data, addr))
+        try:
+            pkt = unpack_packet(data)
+            if pkt.pkt_type == PacketType.PROBE:
+                # Simulates receiver responding with a BEACON packet
+                beacon_pkt = pack_packet(
+                    pkt_type=PacketType.BEACON,
+                    img_id=self.beacon_data_port,
+                    seq=0,
+                    total=0,
+                    crc32=0,
+                    payload=b"",
+                )
+                self.recv_queue.put((beacon_pkt, (self.beacon_sender_ip, 5006)))
+        except Exception:
+            pass
+        return len(data)
+
+    def recvfrom(self, bufsize: int) -> Tuple[bytes, Tuple[str, int]]:
+        try:
+            return self.recv_queue.get(timeout=0.2)
+        except queue.Empty:
+            raise socket.timeout()
+
+    def close(self):
+        self.closed = True
+
+
+def test_discovery_probe_and_beacon_mocked():
+    """
+    Task B acceptance criteria:
+    Mock the UDP socket layer, assert that a PROBE sent by DiscoveryListener
+    results in a discovered peer when a BEACON is received in reply.
+    Also validates TTL expiration behavior.
+    """
+    mock_sock = MockDiscoverySocket(beacon_sender_ip="192.168.1.77", beacon_data_port=5005)
+    listener = DiscoveryListener(
+        discovery_port=5006,
+        peer_ttl=2.0,
+        probe_interval=10.0,
+        sock=mock_sock,
+    )
+
+    listener.start()
+    try:
+        # Give worker a moment to send initial probe and process beacon reply
+        time.sleep(0.3)
+
+        # 1. Assert PROBE packet was sent
+        assert len(mock_sock.sent_packets) > 0
+        probe_raw, target_addr = mock_sock.sent_packets[0]
+        probe_pkt = unpack_packet(probe_raw)
+        assert probe_pkt.pkt_type == PacketType.PROBE
+        assert probe_pkt.magic == MAGIC
+
+        # 2. Assert peer was discovered with data port 5005
+        receivers = listener.get_receivers()
+        assert ("192.168.1.77", 5005) in receivers
+
+        # 3. Assert detailed status for UI
+        peers = listener.get_discovered_peers()
+        assert len(peers) == 1
+        assert peers[0]["host"] == "192.168.1.77"
+        assert peers[0]["port"] == 5005
+        assert peers[0]["is_active"] is True
+
+        # 4. Assert peer TTL expiration (> 2.0s)
+        # Advance peer timestamp into the past
+        with listener._lock:
+            listener._peers[("192.168.1.77", 5005)] = time.monotonic() - 5.0
+
+        expired_receivers = listener.get_receivers()
+        assert ("192.168.1.77", 5005) not in expired_receivers
+        assert len(expired_receivers) == 0
+
+    finally:
+        listener.stop()
+
+
+def test_discovery_beacon_thread_reply_to_probe():
+    """
+    Validates receiver DiscoveryBeaconThread:
+    When a PROBE packet is received from a sender, it unicasts a BEACON
+    packet back to the sender containing the receiver's data port in img_id.
+    """
+    class MockBeaconSocket:
+        def __init__(self):
+            self.incoming: queue.Queue = queue.Queue()
+            self.replies: List[Tuple[bytes, Tuple[str, int]]] = []
+
+        def setsockopt(self, *args, **kwargs):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, data: bytes, addr: Tuple[str, int]):
+            self.replies.append((data, addr))
+            return len(data)
+
+        def recvfrom(self, bufsize: int) -> Tuple[bytes, Tuple[str, int]]:
+            try:
+                return self.incoming.get(timeout=0.1)
+            except queue.Empty:
+                raise socket.timeout()
+
+        def close(self):
+            pass
+
+    mock_sock = MockBeaconSocket()
+    beacon_thread = DiscoveryBeaconThread(
+        data_port=5005,
+        discovery_port=5006,
+        beacon_interval=10.0,
+        sock=mock_sock,
+    )
+    beacon_thread.start()
+
+    try:
+        time.sleep(0.1)  # allow startup broadcast
+
+        # Inject incoming PROBE from sender at 192.168.1.55:5006
+        probe_pkt = pack_packet(PacketType.PROBE, 0, 0, 0, 0, b"")
+        mock_sock.incoming.put((probe_pkt, ("192.168.1.55", 5006)))
+
+        # Wait for reply
+        time.sleep(0.2)
+
+        # Find reply to 192.168.1.55:5006
+        reply_found = False
+        for raw, addr in mock_sock.replies:
+            if addr == ("192.168.1.55", 5006):
+                pkt = unpack_packet(raw)
+                assert pkt.pkt_type == PacketType.BEACON
+                assert pkt.img_id == 5005  # carries receiver's data port
+                reply_found = True
+                break
+
+        assert reply_found is True, "DiscoveryBeaconThread did not send unicast BEACON reply to sender"
+
+    finally:
+        beacon_thread.stop()
+
 
 

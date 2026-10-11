@@ -161,6 +161,15 @@ class ReceiverApp(tk.Tk):
         )
         self.lbl_lan_ip.pack(side=tk.LEFT)
 
+        self.lbl_discovery_status = tk.Label(
+            lan_info_frame,
+            text="Discovery: active (port 5006)",
+            font=("Segoe UI", 9, "bold"),
+            fg="#70e000",
+            bg="#1a1c26",
+        )
+        self.lbl_discovery_status.pack(side=tk.RIGHT)
+
         # Alert Metadata Cards Box
         meta_box = tk.LabelFrame(
             left_col,
@@ -271,8 +280,14 @@ class ReceiverApp(tk.Tk):
                 self.lbl_lan_ip.config(
                     text=f"🌐 Local LAN IPv4 for Sender: {lan_ip_str} (Port {port})"
                 )
+            if hasattr(self, "lbl_discovery_status"):
+                self.lbl_discovery_status.config(
+                    text="Discovery: active (port 5006)", fg="#70e000"
+                )
             return True
         except Exception as e:
+            if hasattr(self, "lbl_discovery_status"):
+                self.lbl_discovery_status.config(text="Discovery: inactive", fg="#8d99ae")
             messagebox.showerror(
                 "Network Error",
                 f"Failed to bind Receiver socket to {host}:{port}.\nError: {e}",
@@ -288,9 +303,17 @@ class ReceiverApp(tk.Tk):
 
     def _append_log(self, text: str):
         def _insert():
-            self.log_text.insert(tk.END, text + "\n")
-            self.log_text.see(tk.END)
-        self.after(0, _insert)
+            try:
+                if self.winfo_exists():
+                    self.log_text.insert(tk.END, text + "\n")
+                    self.log_text.see(tk.END)
+            except Exception:
+                pass
+        try:
+            if self.winfo_exists():
+                self.after(0, _insert)
+        except Exception:
+            pass
 
     def _clear_logs(self):
         self.log_text.delete("1.0", tk.END)

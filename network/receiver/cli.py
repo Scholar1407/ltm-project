@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from network.receiver.receiver import SmokeAlertReceiver
+from network.receiver.receiver import DiscoveryBeaconThread, SmokeAlertReceiver
 
 
 def sanitize_filename_component(name: str) -> str:
@@ -97,7 +97,12 @@ def main():
     )
 
     receiver.start()
-    print(f"Receiver CLI running on {args.bind}:{args.port} (output dir: {out_path}). Press Ctrl+C to stop.")
+    print(
+        f"Receiver CLI running on {args.bind}:{args.port} (output dir: {out_path}).\n"
+        f"SAP Auto-Discovery beacon active on UDP port 5006.\n"
+        f"Press Ctrl+C to stop.",
+        flush=True,
+    )
 
     try:
         while True:

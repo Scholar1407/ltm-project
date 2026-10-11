@@ -19,6 +19,7 @@ if str(BASE_DIR) not in sys.path:
 
 try:
     from ..shared.protocol import (
+        DISCOVERY_PORT,
         HEADER_SIZE,
         Packet,
         PacketType,
@@ -35,6 +36,7 @@ try:
     )
 except (ImportError, ValueError):
     from network.shared.protocol import (
+        DISCOVERY_PORT,
         HEADER_SIZE,
         Packet,
         PacketType,
@@ -49,6 +51,124 @@ except (ImportError, ValueError):
         pack_packet,
         unpack_packet,
     )
+
+
+class DiscoveryBeaconThread(threading.Thread):
+    """
+    Listens on UDP 5006 for PROBE packets and responds with BEACON.
+    Also broadcasts BEACON on startup and every BEACON_INTERVAL seconds.
+    """
+    BEACON_INTERVAL = 5.0   # seconds between unsolicited beacons
+    DISCOVERY_PORT  = 5006
+
+    def __init__(
+        self,
+        data_port: int = 5005,
+        discovery_port: int = 5006,
+        beacon_interval: float = 5.0,
+        sock: Optional[socket.socket] = None,
+        log_callback: Optional[LogCallback] = None,
+    ):
+        super().__init__(daemon=True)
+        self.data_port = data_port
+        self.discovery_port = discovery_port
+        self.beacon_interval = beacon_interval
+        self._sock = sock
+        self._own_socket = sock is None
+        self._running = False
+        self.log_callback = log_callback
+
+    def stop(self):
+        self._running = False
+        if self._own_socket and self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+
+    def run(self):
+        self._running = True
+        if self._sock is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except Exception:
+                pass
+            try:
+                sock.bind(("0.0.0.0", self.discovery_port))
+            except Exception as e:
+                log_info(
+                    f"Discovery beacon bind note on port {self.discovery_port}: {e}",
+                    self.log_callback,
+                )
+                return
+            sock.settimeout(1.0)
+            self._sock = sock
+        else:
+            sock = self._sock
+
+        beacon_pkt = pack_packet(
+            PacketType.BEACON,
+            img_id=self.data_port,
+            seq=0,
+            total=0,
+            crc32=0,
+            payload=b"",
+        )
+
+        def _get_destinations():
+            dests = {"255.255.255.255", "<broadcast>", "127.0.0.1"}
+            try:
+                for ip in get_local_ipv4_addresses():
+                    parts = ip.split(".")
+                    if len(parts) == 4:
+                        dests.add(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+            except Exception:
+                pass
+            return [(d, self.discovery_port) for d in dests]
+
+        # Startup beacon broadcast
+        for target in _get_destinations():
+            try:
+                sock.sendto(beacon_pkt, target)
+            except Exception:
+                pass
+
+        last_beacon = time.monotonic()
+        while self._running:
+            try:
+                raw, addr = sock.recvfrom(256)
+                pkt = unpack_packet(raw)
+                if pkt.pkt_type == PacketType.PROBE:
+                    try:
+                        sock.sendto(beacon_pkt, addr)  # unicast reply to sender
+                    except Exception:
+                        pass
+                    # Also broadcast response to cover same-host or multi-homed interfaces immediately
+                    for target in _get_destinations():
+                        try:
+                            sock.sendto(beacon_pkt, target)
+                        except Exception:
+                            pass
+            except (socket.timeout, BlockingIOError):
+                pass
+            except Exception:
+                pass
+
+            if time.monotonic() - last_beacon >= self.beacon_interval:
+                for target in _get_destinations():
+                    try:
+                        sock.sendto(beacon_pkt, target)
+                    except Exception:
+                        pass
+                last_beacon = time.monotonic()
+
+        if self._own_socket and self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
 
 @dataclass
@@ -98,6 +218,7 @@ class SmokeAlertReceiver:
         on_image_received: Optional[ImageReceivedCallback] = None,
         on_transfer_complete: Optional[TransferCompleteCallback] = None,
         log_callback: Optional[LogCallback] = None,
+        enable_discovery: bool = True,
     ):
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -106,6 +227,7 @@ class SmokeAlertReceiver:
         self.on_image_received = on_image_received
         self.on_transfer_complete = on_transfer_complete
         self.log_callback = log_callback
+        self.enable_discovery = enable_discovery
 
         self._own_socket = sock is None
         if sock is not None:
@@ -121,6 +243,7 @@ class SmokeAlertReceiver:
         self.running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self.beacon_thread: Optional[DiscoveryBeaconThread] = None
 
     def start(self):
         """Starts the receiver loop in a background thread."""
@@ -129,6 +252,13 @@ class SmokeAlertReceiver:
         self.running = True
         self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._worker_thread.start()
+
+        if self.enable_discovery:
+            self.beacon_thread = DiscoveryBeaconThread(
+                data_port=self.listen_port,
+                log_callback=self.log_callback,
+            )
+            self.beacon_thread.start()
 
         local_ips = get_local_ipv4_addresses()
         log_info(
@@ -143,6 +273,9 @@ class SmokeAlertReceiver:
     def stop(self):
         """Stops the receiver loop and releases socket resources."""
         self.running = False
+        if self.beacon_thread:
+            self.beacon_thread.stop()
+            self.beacon_thread = None
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.0)
         if self._own_socket and self.sock:
