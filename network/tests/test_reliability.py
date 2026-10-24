@@ -10,10 +10,15 @@ Deterministic testing using socket-layer fault injection:
 - CRC32 integrity validation
 """
 
-import queue
 from pathlib import Path
 import subprocess
 import sys
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+import queue
 import socket
 import threading
 import time
