@@ -36,6 +36,7 @@ from network.sender.sender import SmokeAlertSender
 from network.sender.detector_bridge import DetectorBridge, DEFAULT_MODEL_PATH
 from network.sender.discovery import DiscoveryListener
 from network.shared.protocol import MAX_PAYLOAD, parse_endpoints
+from network.shared.telegram_notifier import send_telegram_alert
 
 
 class SenderApp(tk.Tk):
@@ -131,6 +132,21 @@ class SenderApp(tk.Tk):
         self.conf_scale = tk.Scale(cfg_r1, from_=0.1, to=0.9, resolution=0.05, orient=tk.HORIZONTAL, bg="#242632", fg="#edf2f4", highlightthickness=0, length=80)
         self.conf_scale.set(0.50)
         self.conf_scale.pack(side=tk.LEFT, padx=4)
+
+        # Telegram Bot toggle
+        self.var_telegram = tk.BooleanVar(value=True)
+        self.chk_telegram = tk.Checkbutton(
+            cfg_r1,
+            text="📱 Telegram Alert",
+            variable=self.var_telegram,
+            bg="#242632",
+            fg="#4cc9f0",
+            selectcolor="#1a1c24",
+            activebackground="#242632",
+            activeforeground="#4cc9f0",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.chk_telegram.pack(side=tk.LEFT, padx=(10, 0))
 
         # Config Row 2: Discovered Receivers Panel (Task B)
         disc_frame = tk.Frame(config_frame, bg="#242632")
@@ -358,6 +374,12 @@ class SenderApp(tk.Tk):
         original_send_image = self.sender.send_image
 
         def validated_send_image(img_id: int, image_bytes: bytes, timestamp_str: str = "") -> bool:
+            # Asynchronously send alert to Telegram if enabled
+            if getattr(self, "var_telegram", None) and self.var_telegram.get():
+                msg = f"🚨 CẢNH BÁO PHÁT HIỆN HÚT THUỐC!\n• Mã ảnh: #{img_id}\n• Thời gian: {timestamp_str or time.strftime('%Y-%m-%d %H:%M:%S')}\n• Nguồn: Trạm phát hiện YOLOv8s-P2"
+                send_telegram_alert(msg, image_bytes)
+                self._append_log(f"[TELEGRAM] Dispatched alert #{img_id} to Telegram Bot.")
+
             active_eps = self._get_merged_receivers()
             if not active_eps:
                 self.after(0, lambda: self._show_no_receivers_warning(img_id))
