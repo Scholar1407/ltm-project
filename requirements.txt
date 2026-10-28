@@ -9,3 +9,7 @@ numpy
 pyyaml
 pandas
 matplotlib
+pillow
+
+# Testing Framework
+pytest>=8.0.0

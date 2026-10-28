@@ -1,0 +1,9 @@
+split,metric,yolov8s_baseline,yolov8s_p2,diff
+Full Test Set (732 imgs),mAP50,0.8997,0.8956,-0.0041 (-0.41pp)
+Full Test Set (732 imgs),mAP50-95,0.5935,0.5840,-0.0095 (-0.95pp)
+Full Test Set (732 imgs),Recall,0.8232,0.8358,+0.0126 (+1.26pp)
+Full Test Set (732 imgs),Precision,0.9011,0.8992,-0.0019 (-0.19pp)
+Clean Test Subset (378 imgs),mAP50,0.7050,0.7001,-0.0049 (-0.49pp)
+Clean Test Subset (378 imgs),mAP50-95,0.3447,0.3381,-0.0066 (-0.66pp)
+Clean Test Subset (378 imgs),Recall,0.6177,0.6364,+0.0187 (+1.87pp)
+Clean Test Subset (378 imgs),Precision,0.7595,0.7648,+0.0053 (+0.53pp)
